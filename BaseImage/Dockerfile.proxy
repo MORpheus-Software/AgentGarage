@@ -5,6 +5,7 @@ FROM --platform=$BUILDPLATFORM golang:1.22.3-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
+ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 
 # Install git and build essentials
@@ -16,13 +17,14 @@ WORKDIR /app
 COPY . .
 
 # Build the binary for the specified architecture
-RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_ENABLED=0 ./scripts/build.sh
+RUN echo "Building for OS=${TARGETOS} ARCH=${TARGETARCH} PLATFORM=${TARGETPLATFORM}" && \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_ENABLED=0 ./scripts/build.sh
 
 # Final stage - use correct platform
-FROM --platform=$TARGETPLATFORM alpine:latest
+FROM --platform=${TARGETPLATFORM} alpine:latest
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates dbus dbus-x11
+RUN apk add --no-cache ca-certificates dbus dbus-x11 curl
 
 WORKDIR /app
 
@@ -35,6 +37,6 @@ RUN mkdir -p /app/data && \
     chmod 755 /app/data
 
 # Expose the port
-EXPOSE 9000
+EXPOSE 8080
 
-CMD ["nfa-proxy"]
+CMD ["/usr/bin/nfa-proxy"]

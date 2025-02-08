@@ -7,9 +7,10 @@ services:
       dockerfile: Dockerfile.proxy
       args:
         TARGETOS: linux
-        TARGETARCH: arm64  # Changed from amd64 to arm64
+        TARGETARCH: arm64
+        TARGETPLATFORM: linux/arm64
       platforms:
-        - linux/arm64      # Changed from linux/amd64 to linux/arm64
+        - linux/arm64
     # image: nfa-proxy:latest
     env_file:
       - .env

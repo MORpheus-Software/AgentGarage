@@ -137,6 +137,8 @@ dist
 
 */.DS_Store
 
+#dev artifacts
+BaseImage/bin
 
 #submodules
 BaseImage/morpheus-node

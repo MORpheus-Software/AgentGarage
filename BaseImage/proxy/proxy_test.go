@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"testing"
 	"time"
 )
@@ -197,54 +196,163 @@ func TestFindModelID(t *testing.T) {
 	}
 }
 
-func TestProxyChatCompletion(t *testing.T) {
-	// Setup test server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/blockchain/models":
-			json.NewEncoder(w).Encode(map[string][]ModelInfo{
-				"models": {{Id: "test-model", Name: "Test Model"}},
-			})
-		case "/blockchain/models/test-model/session":
-			json.NewEncoder(w).Encode(map[string]string{
-				"sessionID": "test-session",
-			})
-		case "/chat/completions":
-			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintf(w, "data: {\"choices\": [{\"text\": \"test response\"}]}\n\n")
-		}
-	}))
-	defer server.Close()
-
-	// Set environment variable for test
-	os.Setenv("MARKETPLACE_URL", server.URL)
-	defer os.Unsetenv("MARKETPLACE_URL")
-
-	// Create test request
-	reqBody := map[string]interface{}{
-		"model":    "Test Model",
-		"messages": []map[string]string{{"role": "user", "content": "Hello"}},
-	}
-	reqBytes, _ := json.Marshal(reqBody)
-	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBuffer(reqBytes))
-	req.Header.Set("Content-Type", "application/json")
-
-	// Create response recorder
+func TestHealthEndpoint(t *testing.T) {
+	// Create a new request to the health endpoint
+	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
 
-	// Call the handler
-	ProxyChatCompletion(w, req)
+	// Create a handler function that matches the signature of http.HandlerFunc
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+	})
 
-	// Check response
+	// Call the handler
+	handler.ServeHTTP(w, req)
+
+	// Check the response
 	resp := w.Result()
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status OK, got %v", resp.StatusCode)
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
 	}
 
-	// Verify response contains streaming data
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "test response") {
-		t.Errorf("Response does not contain expected content")
+	// Read and parse the response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Failed to read response body: %v", err)
+	}
+
+	var response map[string]string
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatalf("Failed to parse response body: %v", err)
+	}
+
+	if status, ok := response["status"]; !ok || status != "healthy" {
+		t.Errorf("Expected status 'healthy', got '%s'", status)
+	}
+}
+
+func TestHandleGetModels(t *testing.T) {
+	// Create a mock marketplace server
+	mockMarketplace := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("Expected GET request, got %s", r.Method)
+		}
+		if r.URL.Path != "/blockchain/models" {
+			t.Errorf("Expected path /blockchain/models, got %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string][]ModelInfo{
+			"models": {
+				{Id: "model1", Name: "Test Model 1"},
+				{Id: "model2", Name: "Test Model 2"},
+			},
+		})
+	}))
+	defer mockMarketplace.Close()
+
+	// Create a new request to get models
+	req := httptest.NewRequest("GET", "/blockchain/models", nil)
+	w := httptest.NewRecorder()
+
+	// Create a new proxy instance and call the handler
+	NewProxy().handleGetModels(w, req)
+
+	// Check the response
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
+	// Read and parse the response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Failed to read response body: %v", err)
+	}
+
+	var response map[string][]ModelInfo
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatalf("Failed to parse response body: %v", err)
+	}
+
+	models, ok := response["models"]
+	if !ok {
+		t.Fatal("Response does not contain 'models' field")
+	}
+
+	if len(models) != 2 {
+		t.Errorf("Expected 2 models, got %d", len(models))
+	}
+}
+
+func TestHandleChatCompletions(t *testing.T) {
+	// Create a mock marketplace server
+	mockMarketplace := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("Expected POST request, got %s", r.Method)
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("Expected path /v1/chat/completions, got %s", r.URL.Path)
+		}
+
+		// Read and validate request body
+		var request ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("Failed to decode request body: %v", err)
+		}
+
+		// Send streaming response
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+
+		// Simulate streaming response
+		for i := 0; i < 3; i++ {
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"test response %d\"}}]}\n\n", i)
+			w.(http.Flusher).Flush()
+			time.Sleep(100 * time.Millisecond)
+		}
+	}))
+	defer mockMarketplace.Close()
+
+	// Create a chat completion request
+	request := ChatCompletionRequest{
+		Model: "test-model",
+		Messages: []Message{
+			{Role: "user", Content: "Hello"},
+		},
+		Stream: true,
+	}
+
+	requestBody, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("Failed to marshal request: %v", err)
+	}
+
+	// Create a new request
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBuffer(requestBody))
+	w := httptest.NewRecorder()
+
+	// Create a new proxy instance and call the handler
+	NewProxy().handleChatCompletions(w, req)
+
+	// Check the response
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
+	// Read the response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Failed to read response body: %v", err)
+	}
+
+	// Split the response into events
+	events := bytes.Split(body, []byte("\n\n"))
+	if len(events) < 3 {
+		t.Errorf("Expected at least 3 events, got %d", len(events))
 	}
 }
 

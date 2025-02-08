@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -215,5 +216,109 @@ func TestProxyServerOpenAICompatibility(t *testing.T) {
 	}
 
 	// Wait for the mock server to shut down if it was started
+	wg.Wait()
+}
+
+type ChatCompletionRequest struct {
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
+	Stream   bool      `json:"stream"`
+}
+
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+func TestChatCompletionEndToEnd(t *testing.T) {
+	// Test configuration
+	proxyURL := "http://localhost:8080"
+	modelID := "test-model"
+	numRequests := 5
+	var wg sync.WaitGroup
+
+	// Create a chat completion request
+	request := ChatCompletionRequest{
+		Model: modelID,
+		Messages: []Message{
+			{Role: "user", Content: "Hello"},
+		},
+		Stream: true,
+	}
+
+	requestBody, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("Failed to marshal request: %v", err)
+	}
+
+	// Send multiple concurrent requests
+	for i := 0; i < numRequests; i++ {
+		wg.Add(1)
+		go func(requestNum int) {
+			defer wg.Done()
+
+			// Create a new request
+			req, err := http.NewRequest("POST", fmt.Sprintf("%s/v1/chat/completions", proxyURL), bytes.NewBuffer(requestBody))
+			if err != nil {
+				t.Errorf("Failed to create request %d: %v", requestNum, err)
+				return
+			}
+
+			// Set headers
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json")
+
+			// Send the request
+			client := &http.Client{
+				Timeout: time.Minute * 5,
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Errorf("Failed to send request %d: %v", requestNum, err)
+				return
+			}
+			defer resp.Body.Close()
+
+			// Check response status
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				t.Errorf("Request %d failed with status %d: %s", requestNum, resp.StatusCode, string(body))
+				return
+			}
+
+			// Read and validate streaming response
+			reader := bufio.NewReader(resp.Body)
+			eventCount := 0
+			for {
+				line, err := reader.ReadBytes('\n')
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					t.Errorf("Error reading stream in request %d: %v", requestNum, err)
+					return
+				}
+
+				// Skip empty lines
+				if len(bytes.TrimSpace(line)) == 0 {
+					continue
+				}
+
+				// Parse and validate the event
+				if !bytes.HasPrefix(line, []byte("data: ")) {
+					t.Errorf("Invalid event format in request %d: %s", requestNum, string(line))
+					continue
+				}
+
+				eventCount++
+			}
+
+			if eventCount == 0 {
+				t.Errorf("Request %d received no events", requestNum)
+			}
+		}(i)
+	}
+
+	// Wait for all requests to complete
 	wg.Wait()
 }
